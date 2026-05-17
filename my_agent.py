@@ -66,7 +66,10 @@ def clean_predictions(result: dict, valid_outcomes: list) -> dict:
     bonus = invalid_total / len(valid)
     for p in valid:
         p["probability"] = round(p["probability"] + bonus, 4)
-
+    # Normalize so everything sums to exactly 1.0
+    total = sum(p["probability"] for p in valid)
+    for p in valid:
+        p["probability"] = max(round(p["probability"] / total, 4), 0.001)
     # Make sure all valid outcomes are included
     covered = {p["market"] for p in valid}
     for o in valid_outcomes:
@@ -167,7 +170,7 @@ CRITICAL: Return ONLY the JSON object. No explanation text before or after."""
         json={
             "model": "openai/gpt-4o-mini",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2
+            "temperature": 0.3
         }
     )
 
