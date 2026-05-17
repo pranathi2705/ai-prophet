@@ -50,7 +50,7 @@ def get_kalshi_price(ticker: str) -> dict | None:
     return None
 
 
-def clean_predictions(result: dict, valid_outcomes: list) -> dict:
+def clean_predictions(result: dict, valid_outcomes: list, normalize: bool = True) -> dict:
     """Remove invalid outcomes and redistribute their probability."""
     probs = result.get("probabilities", [])
 
@@ -65,16 +65,19 @@ def clean_predictions(result: dict, valid_outcomes: list) -> dict:
     # Redistribute invalid probability equally to valid ones
     bonus = invalid_total / len(valid)
     for p in valid:
-        p["probability"] = round(p["probability"] + bonus, 4)
-    # Normalize so everything sums to exactly 1.0
-    total = sum(p["probability"] for p in valid)
-    for p in valid:
-        p["probability"] = max(round(p["probability"] / total, 4), 0.001)
+        p["probability"] = max(round(p["probability"] + bonus, 4), 0.001)
+
     # Make sure all valid outcomes are included
     covered = {p["market"] for p in valid}
     for o in valid_outcomes:
         if o not in covered:
             valid.append({"market": o, "probability": 0.001})
+
+    # Only normalize for single-winner events
+    if normalize:
+        total = sum(p["probability"] for p in valid)
+        for p in valid:
+            p["probability"] = max(round(p["probability"] / total, 4), 0.001)
 
     return {"probabilities": valid}
 
@@ -88,6 +91,12 @@ def predict(event: dict) -> dict:
     category = event.get("category", "")
 
     outcomes_text = "\n".join([f"- {o}" for o in outcomes])
+
+    # Detect multi-winner events
+    is_multi_winner = any(word in (rules + title).lower() for word in [
+        "top 4", "top 5", "top 3", "top 2", "top four", "top five",
+        "finisher", "qualify", "advance", "top-4", "top-5", "top-3"
+    ])
 
     # 1. Get Kalshi price
     kalshi_data = get_kalshi_price(ticker)
@@ -111,7 +120,19 @@ Use this as your primary anchor.
         focused_results = web_search(focused_query)
         search_results = search_results + "\n" + focused_results
 
-    # 3. Build prompt
+    # 3. Build multi-winner context
+    multi_winner_instructions = ""
+    if is_multi_winner:
+        multi_winner_instructions = """
+SPECIAL RULE — MULTI-WINNER EVENT:
+This event allows MULTIPLE outcomes to be correct simultaneously (e.g. top 4 finishers).
+Each probability is INDEPENDENT — do NOT force them to sum to 1.
+Each outcome gets its own probability: P(this specific team/person qualifies).
+Example: If 4 teams qualify from 18, baseline is roughly 4/18 = 22% per team.
+Adjust up/down based on current form and standings.
+"""
+
+    # 4. Build prompt
     prompt = f"""You are an expert forecaster who predicts outcomes across ANY domain — sports, politics, economics, entertainment, technology, and more.
 
 Event: {title}
@@ -127,15 +148,17 @@ FRESH WEB SEARCH RESULTS (today's data):
 Possible outcomes (YOU MUST ONLY USE THESE EXACT NAMES, NO OTHERS):
 {outcomes_text}
 
+{multi_winner_instructions}
+
 STRICT RULES:
 - The above list is the COMPLETE list of valid outcomes
 - Do NOT add "other", "other outcome", or any name not in the list above
 - Every probability must map to one of the exact names listed above
-- If you want to assign low probability to many teams, use 0.001 for each — but still name them exactly
+- Never give any outcome a probability of 0
 
 Think step by step:
 
-1. UNDERSTAND: What type of event is this? What domain?
+1. UNDERSTAND: What type of event is this? Single winner or multiple winners?
 
 2. USE DATA: What does the Kalshi price tell you? What do the web search results say about current standings, polls, odds, or status?
 
@@ -147,7 +170,7 @@ Think step by step:
    - Unknown: use base rates and available evidence
 
 4. CALIBRATE: Don't be overconfident. Spread probability across realistic options.
-   IMPORTANT: For events with many outcomes (10+), only assign meaningful probability to the top 5-6 realistic contenders. Give the rest 0.001 each. Keep your JSON clean and valid.
+   IMPORTANT: For events with many outcomes (10+), only assign meaningful probability to the top 5-6 realistic contenders. Give the rest 0.001 each.
 
 5. OUTPUT only this JSON. Start with {{ and end with }}. No explanation before or after:
 {{
@@ -157,7 +180,7 @@ Think step by step:
   ]
 }}
 
-All outcome names must match exactly. Probabilities must sum to 1.0.
+All outcome names must match exactly.
 NEVER invent outcome names. Only use names from the exact list provided above.
 CRITICAL: Return ONLY the JSON object. No explanation text before or after."""
 
@@ -171,21 +194,22 @@ CRITICAL: Return ONLY the JSON object. No explanation text before or after."""
             "model": "openai/gpt-4o-mini",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3
-        }
+        },
+        timeout=25
     )
 
     content = response.json()["choices"][0]["message"]["content"]
 
     # Try multiple parsing strategies
     try:
-        return clean_predictions(json.loads(content), outcomes)
+        return clean_predictions(json.loads(content), outcomes, normalize=not is_multi_winner)
     except Exception:
         pass
 
     try:
         match = re.search(r'\{.*\}', content, re.DOTALL)
         if match:
-            return clean_predictions(json.loads(match.group()), outcomes)
+            return clean_predictions(json.loads(match.group()), outcomes, normalize=not is_multi_winner)
     except Exception:
         pass
 
@@ -193,7 +217,7 @@ CRITICAL: Return ONLY the JSON object. No explanation text before or after."""
         cleaned = content.replace('\n', ' ').replace('    ', ' ')
         match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if match:
-            return clean_predictions(json.loads(match.group()), outcomes)
+            return clean_predictions(json.loads(match.group()), outcomes, normalize=not is_multi_winner)
     except Exception:
         pass
 
