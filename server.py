@@ -6,3 +6,6 @@ app = FastAPI()
 @app.post("/predict")
 async def predict_endpoint(event: dict):
     return predict(event)
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
